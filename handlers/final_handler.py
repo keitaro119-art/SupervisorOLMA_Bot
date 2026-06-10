@@ -3,6 +3,7 @@
 # Finalización de supervisión
 # Flujo:
 # Confirmar → Observaciones finales → Estado final → Guardar → Resumen
+# Compatible con headers actuales de Supervisiones_v2
 # =========================
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -87,6 +88,14 @@ def _compute_total_duration(chat_id: int) -> tuple[float, str, str]:
     return duration_seconds, start_str, end_str
 
 
+def _maps_link(lat, lon) -> str:
+    lat = _safe_text(lat)
+    lon = _safe_text(lon)
+    if not lat or not lon:
+        return ""
+    return f"https://www.google.com/maps?q={lat},{lon}"
+
+
 # =========================
 # MÓDULOS
 # =========================
@@ -119,11 +128,60 @@ def _get_modules_summary(chat_id: int) -> list[dict]:
 
 
 # =========================
-# SERIALIZACIÓN
+# OBSERVACIONES / EVIDENCIAS
 # =========================
-def _serialize_evidencias(chat_id: int) -> str:
+def _get_evidencias(chat_id: int) -> list:
     evidencias = get_data(chat_id, "evidencias", [])
-    if not isinstance(evidencias, list) or not evidencias:
+    return evidencias if isinstance(evidencias, list) else []
+
+
+def _normalize_key(value: str) -> str:
+    return _safe_text(value).upper().replace(" ", "_").replace("-", "_")
+
+
+def _get_obs_by_keywords(chat_id: int, keywords: list[str]) -> str:
+    """
+    Busca observaciones dentro de la lista evidencias.
+    Funciona con tipo/opcional_tipo/opcional_subopcion.
+    """
+    keys = [_normalize_key(k) for k in keywords]
+    found = []
+
+    for ev in _get_evidencias(chat_id):
+        tipo = _normalize_key(ev.get("tipo"))
+        opcional_tipo = _normalize_key(ev.get("opcional_tipo"))
+        opcional_subopcion = _normalize_key(ev.get("opcional_subopcion"))
+        resultado = _safe_text(ev.get("resultado"))
+        observacion = _safe_text(ev.get("observacion"))
+
+        searchable = "|".join([tipo, opcional_tipo, opcional_subopcion])
+        if any(k in searchable for k in keys):
+            parts = []
+            if resultado:
+                parts.append(f"Resultado: {resultado}")
+            if observacion:
+                parts.append(f"Obs: {observacion}")
+            if parts:
+                found.append(" / ".join(parts))
+
+    return "\n".join(found)
+
+
+def _has_evidence_by_keywords(chat_id: int, keywords: list[str]) -> str:
+    keys = [_normalize_key(k) for k in keywords]
+    for ev in _get_evidencias(chat_id):
+        tipo = _normalize_key(ev.get("tipo"))
+        opcional_tipo = _normalize_key(ev.get("opcional_tipo"))
+        opcional_subopcion = _normalize_key(ev.get("opcional_subopcion"))
+        searchable = "|".join([tipo, opcional_tipo, opcional_subopcion])
+        if any(k in searchable for k in keys):
+            return "SI"
+    return "NO"
+
+
+def _serialize_evidencias(chat_id: int) -> str:
+    evidencias = _get_evidencias(chat_id)
+    if not evidencias:
         return ""
 
     lines = []
@@ -147,109 +205,130 @@ def _serialize_evidencias(chat_id: int) -> str:
             extra_parts.append(f"opcional_subopcion={opcional_subopcion}")
 
         extra = " | " + " | ".join(extra_parts) if extra_parts else ""
-
-        lines.append(
-            f"{idx}) tipo={tipo} | media_type={media_type} | file_id={file_id}{extra}"
-        )
+        lines.append(f"{idx}) tipo={tipo} | media_type={media_type} | file_id={file_id}{extra}")
 
     return "\n".join(lines)
 
 
 def _serialize_modules(chat_id: int) -> str:
     lines = []
-
     for mod in _get_modules_summary(chat_id):
         lines.append(f"- {mod['nombre']}")
         lines.append(f"Estado: {mod['estado']}")
         lines.append(f"Tiempo: {mod['tiempo']}")
         lines.append("")
-
     return "\n".join(lines).strip()
 
 
+# =========================
+# PAYLOAD GOOGLE SHEET
+# =========================
 def _build_supervision_payload(chat_id: int) -> dict:
     data = get_all_data(chat_id)
     resumen_steps = get_all_steps_summary(chat_id)
     duration_seconds, start_str, end_str = _compute_total_duration(chat_id)
 
+    lat = _safe_text(data.get("ubicacion_lat"))
+    lon = _safe_text(data.get("ubicacion_lon"))
+
+    drop_cto_lat = _safe_text(data.get("drop_ext_cto_lat") or data.get("info_drop_ext_cto_lat") or data.get("Drop_Externo_CTO_Latitud"))
+    drop_cto_lon = _safe_text(data.get("drop_ext_cto_lon") or data.get("info_drop_ext_cto_lon") or data.get("Drop_Externo_CTO_Longitud"))
+    drop_dom_lat = _safe_text(data.get("drop_ext_dom_lat") or data.get("info_drop_ext_dom_lat") or data.get("Drop_Externo_Domicilio_Latitud"))
+    drop_dom_lon = _safe_text(data.get("drop_ext_dom_lon") or data.get("info_drop_ext_dom_lon") or data.get("Drop_Externo_Domicilio_Longitud"))
+
+    # Todos los nombres deben coincidir exactamente con los headers de Supervisiones_v2.
     payload = {
-        "registrado_en": now_peru_str(),
-        "hora_inicio": start_str,
-        "hora_fin": end_str,
-        "duracion_total_segundos": int(duration_seconds),
-        "duracion_total": _format_duration(duration_seconds),
+        "ID_Supervision": _safe_text(data.get("id_supervision")) or f"SUP-{int(now_peru_dt().timestamp())}",
+        "ESTADO": "FINALIZADA",
+        "Fecha_Creacion": start_str or now_peru_str(),
+        "Fecha_Cierre": end_str,
 
-        "supervisor": _safe_text(data.get("supervisor")),
-        "empresa": _safe_text(data.get("empresa")),
-        "cuadrilla": _safe_text(data.get("cuadrilla")),
-        "placa_unidad": _safe_text(data.get("placa_unidad")),
-        "codigo_pedido": _safe_text(data.get("codigo_pedido")),
-        "distrito": _safe_text(data.get("distrito")),
-        "tipo_supervision": _safe_text(data.get("tipo_supervision")),
+        "Supervisor": _safe_text(data.get("supervisor")),
+        "Operador": _safe_text(data.get("empresa")) or _safe_text(data.get("operador")),
+        "Técnico": _safe_text(data.get("tecnico_1_nombre")),
+        "Contrata": _safe_text(data.get("contrata")) or _safe_text(data.get("empresa")) or _safe_text(data.get("tecnico_1_empresa")),
+        "Gestor": _safe_text(data.get("gestor")),
+        "Código_Pedido": _safe_text(data.get("codigo_pedido")),
+        "Tipo_Supervision": _safe_text(data.get("tipo_supervision")),
+        "Distrito": _safe_text(data.get("distrito")),
+        "Latitud": lat,
+        "Longitud": lon,
+        "Link_Ubicacion": _maps_link(lat, lon),
 
-        "tecnico_1_nombre": _safe_text(data.get("tecnico_1_nombre")),
-        "tecnico_1_empresa": _safe_text(data.get("tecnico_1_empresa")),
-        "tecnico_2_nombre": _safe_text(data.get("tecnico_2_nombre")),
-        "tecnico_2_empresa": _safe_text(data.get("tecnico_2_empresa")),
-        "tecnico_3_nombre": _safe_text(data.get("tecnico_3_nombre")),
-        "tecnico_3_empresa": _safe_text(data.get("tecnico_3_empresa")),
+        "Obs_CTO": _get_obs_by_keywords(chat_id, ["CTO"]),
+        "Obs_POSTE": _get_obs_by_keywords(chat_id, ["POSTE"]),
+        "Obs_RUTA": _get_obs_by_keywords(chat_id, ["RUTA"]),
+        "Obs_FALSO_TRAMO": _get_obs_by_keywords(chat_id, ["FALSO_TRAMO", "FALSO"]),
+        "Obs_RESERVA_DOMICILIO": _get_obs_by_keywords(chat_id, ["RESERVA_DOMICILIO", "RESERVA"]),
+        "Obs_ROSETA": _get_obs_by_keywords(chat_id, ["ROSETA"]),
+        "Obs_EQUIPOS": _get_obs_by_keywords(chat_id, ["EQUIPOS", "EQUIPO"]),
+        "Obs_TECNICOS": _get_obs_by_keywords(chat_id, ["TECNICOS", "TECNICO", "FOTO_TECNICOS"]),
+        "Obs_SCTR": _get_obs_by_keywords(chat_id, ["SCTR"]),
+        "Obs_ATS": _get_obs_by_keywords(chat_id, ["ATS"]),
+        "Obs_LICENCIA": _get_obs_by_keywords(chat_id, ["LICENCIA"]),
+        "Obs_UNIDAD": _get_obs_by_keywords(chat_id, ["UNIDAD", "VEHICULO"]),
+        "Obs_SOAT": _get_obs_by_keywords(chat_id, ["SOAT"]),
+        "Obs_HERRAMIENTAS": _get_obs_by_keywords(chat_id, ["HERRAMIENTAS", "HERRAMIENTA"]),
+        "Obs_KIT_FIBRA": _get_obs_by_keywords(chat_id, ["KIT_FIBRA", "KIT"]),
+        "Obs_ESCALERA_TELESCOPICA": _get_obs_by_keywords(chat_id, ["ESCALERA_TEL", "ESCALERA_TELESCOPICA"]),
+        "Obs_ESCALERA_INTERNOS": _get_obs_by_keywords(chat_id, ["ESCALERA_INT", "ESCALERA_INTERNOS"]),
+        "Obs_BOTIQUIN": _get_obs_by_keywords(chat_id, ["BOTIQUIN"]),
+        "Obs_ADICIONALES": _get_obs_by_keywords(chat_id, ["ADICIONALES", "OPCIONALES"]),
+        "Obs_FINALES": _safe_text(data.get("observaciones_finales")),
 
-        "ubicacion_lat": _safe_text(data.get("ubicacion_lat")),
-        "ubicacion_lon": _safe_text(data.get("ubicacion_lon")),
-        "selfie_fachada_file_id": _safe_text(data.get("selfie_fachada_file_id")),
-        "selfie_fachada_file_unique_id": _safe_text(data.get("selfie_fachada_file_unique_id")),
+        "PlantillaUUID": _safe_text(data.get("PlantillaUUID")) or _safe_text(data.get("plantilla_uuid")),
+        "Origin_Chat_ID": _safe_text(data.get("origin_chat_id")) or _safe_text(chat_id),
+        "Evidence_Chat_ID": _safe_text(data.get("evidence_chat_id")),
+        "Summary_Chat_ID": _safe_text(data.get("summary_chat_id")),
+        "Creado_Por": _safe_text(data.get("creado_por")) or _safe_text(data.get("supervisor")),
+        "Cancelado_Por": _safe_text(data.get("cancelado_por")),
+        "Motivo_Cancelacion": _safe_text(data.get("motivo_cancelacion")),
+        "Updated_At": now_peru_str(),
+        "Estado_Final": _safe_text(data.get("estado_final")) or "CORRECTA",
 
-        "info_drop_ext": str(data.get("info_drop_ext", {})),
-        "info_drop_ext_metraje": _safe_text(data.get("info_drop_ext_metraje")),
-        "info_drop_int": _safe_text(data.get("info_drop_int")),
-        "info_postes": _safe_text(data.get("info_postes")),
-        "info_falsos": _safe_text(data.get("info_falsos")),
-        "info_templadores": _safe_text(data.get("info_templadores")),
-        "info_recorrido_file_id": _safe_text(data.get("info_recorrido_file_id")),
-        "info_validacion_acta": _safe_text(data.get("info_validacion_acta")),
+        "Drop_Externo_CTO_Latitud": drop_cto_lat,
+        "Drop_Externo_CTO_Longitud": drop_cto_lon,
+        "Drop_Externo_CTO_Link_Ubicacion": _maps_link(drop_cto_lat, drop_cto_lon),
+        "Drop_Externo_Domicilio_Latitud": drop_dom_lat,
+        "Drop_Externo_Domicilio_Longitud": drop_dom_lon,
+        "Drop_Externo_Domicilio_Link_Ubicacion": _maps_link(drop_dom_lat, drop_dom_lon),
+        "Metraje_Drop_Externo": _safe_text(data.get("info_drop_ext_metraje")) or _safe_text(data.get("metraje_drop_externo")),
+        "Metraje_Drop_Interno": _safe_text(data.get("info_drop_int")) or _safe_text(data.get("metraje_drop_interno")),
+        "Cantidad_Postes_Usados": _safe_text(data.get("info_postes")) or _safe_text(data.get("cantidad_postes_usados")),
+        "Cantidad_Falsos_Tramos": _safe_text(data.get("info_falsos")) or _safe_text(data.get("cantidad_falsos_tramos")),
+        "Cantidad_Templadores_Aprox": _safe_text(data.get("info_templadores")) or _safe_text(data.get("cantidad_templadores_aprox")),
+        "Captura_Recorrido_Obs": _safe_text(data.get("info_recorrido_obs")) or _safe_text(data.get("info_recorrido_file_id")),
+        "Info_Tecnico_Acta_Correcta": _safe_text(data.get("info_validacion_acta")),
+        "Captura_Recorrido_Cargado": "SI" if _safe_text(data.get("info_recorrido_file_id")) else "NO",
+        "Updated_At_Info_Supervision": now_peru_str(),
+        "Fecha_sup": (end_str or now_peru_str())[:10],
+    }
 
-        "observaciones_finales": _safe_text(data.get("observaciones_finales")),
-
+    # Campos extra no se guardan en Sheet porque no existen como headers,
+    # pero se dejan disponibles por si luego agregas columnas.
+    payload.update({
         "evidencias_resumen": str(resumen_steps),
         "evidencias_detalle": _serialize_evidencias(chat_id),
         "modulos_resumen": _serialize_modules(chat_id),
-
-        "mod_instalacion_estado": _safe_text(get_data(chat_id, "mod_instalacion_estado")),
-        "mod_instalacion_duracion": _safe_text(get_data(chat_id, "mod_instalacion_duracion")),
-        "mod_herramientas_estado": _safe_text(get_data(chat_id, "mod_herramientas_estado")),
-        "mod_herramientas_duracion": _safe_text(get_data(chat_id, "mod_herramientas_duracion")),
-        "mod_epp_estado": _safe_text(get_data(chat_id, "mod_epp_estado")),
-        "mod_epp_duracion": _safe_text(get_data(chat_id, "mod_epp_duracion")),
-        "mod_epe_estado": _safe_text(get_data(chat_id, "mod_epe_estado")),
-        "mod_epe_duracion": _safe_text(get_data(chat_id, "mod_epe_duracion")),
-        "mod_uniformes_estado": _safe_text(get_data(chat_id, "mod_uniformes_estado")),
-        "mod_uniformes_duracion": _safe_text(get_data(chat_id, "mod_uniformes_duracion")),
-        "mod_vehiculo_estado": _safe_text(get_data(chat_id, "mod_vehiculo_estado")),
-        "mod_vehiculo_duracion": _safe_text(get_data(chat_id, "mod_vehiculo_duracion")),
-        "mod_opcionales_estado": _safe_text(get_data(chat_id, "mod_opcionales_estado")),
-        "mod_opcionales_duracion": _safe_text(get_data(chat_id, "mod_opcionales_duracion")),
-        "mod_info_estado": _safe_text(get_data(chat_id, "mod_info_estado")),
-        "mod_info_duracion": _safe_text(get_data(chat_id, "mod_info_duracion")),
-
-        "estado_supervision": "FINALIZADA",
-        "estado": "Completado",
-        "estado_final": _safe_text(data.get("estado_final")) or "CORRECTA",
-        "sheets_estado": "OK",
-    }
+        "duracion_total_segundos": int(duration_seconds),
+        "duracion_total": _format_duration(duration_seconds),
+    })
 
     return payload
 
 
+# =========================
+# TEXTO DE ÉXITO
+# =========================
 def _build_success_text(payload: dict, chat_id: int) -> str:
-    cuadrilla = _safe_text(payload.get("cuadrilla")) or "-"
-    placa_unidad = _safe_text(payload.get("placa_unidad")) or "-"
-    codigo = _safe_text(payload.get("codigo_pedido")) or "-"
-    estado = _safe_text(payload.get("estado")) or "Completado"
-    estado_final = _safe_text(payload.get("estado_final")) or "-"
-    distrito = _safe_text(payload.get("distrito")) or "-"
+    cuadrilla = _safe_text(get_data(chat_id, "cuadrilla")) or "-"
+    placa_unidad = _safe_text(get_data(chat_id, "placa_unidad")) or "-"
+    codigo = _safe_text(payload.get("Código_Pedido")) or "-"
+    estado = _safe_text(payload.get("ESTADO")) or "FINALIZADA"
+    estado_final = _safe_text(payload.get("Estado_Final")) or "-"
+    distrito = _safe_text(payload.get("Distrito")) or "-"
     duracion = _safe_text(payload.get("duracion_total")) or "-"
-    observaciones = _safe_text(payload.get("observaciones_finales")) or "-"
-    sheets_estado = _safe_text(payload.get("sheets_estado")) or "OK"
+    observaciones = _safe_text(payload.get("Obs_FINALES")) or "-"
 
     lines = [
         "✅ SE FINALIZÓ SUPERVISIÓN",
@@ -273,7 +352,7 @@ def _build_success_text(payload: dict, chat_id: int) -> str:
         lines.append("")
 
     lines.append("-------------------")
-    lines.append(f"📊 Sheets: {sheets_estado}")
+    lines.append("📊 Sheets: OK")
 
     return "\n".join(lines).strip()
 
@@ -310,7 +389,6 @@ async def _save_and_finish(update: Update, context: ContextTypes.DEFAULT_TYPE, e
     chat_id = update.effective_chat.id
 
     set_data(chat_id, "estado_final", estado_final)
-
     payload = _build_supervision_payload(chat_id)
 
     try:
